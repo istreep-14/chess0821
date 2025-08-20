@@ -684,32 +684,55 @@ function addNewGames(games, username) {
 }
 
 /**
- * Processes daily data from game data
+ * Processes daily data from game data with complete date sequence and forward-filled ratings
  */
 function processDailyData(startDate = null, endDate = null) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
   const dailySheet = ss.getSheetByName(SHEETS.DAILY);
+  const profileSheet = ss.getSheetByName(SHEETS.PROFILE);
   
   if (gamesSheet.getLastRow() <= 1) {
     console.log('No games data to process');
     return 0;
   }
   
+  // Get player join date from profile sheet
+  let playerJoinDate = null;
+  if (profileSheet && profileSheet.getLastRow() > 1) {
+    const profileData = profileSheet.getRange(2, 1, profileSheet.getLastRow() - 1, 2).getValues();
+    const joinedRow = profileData.find(row => row[0] === 'joined');
+    if (joinedRow && joinedRow[1] instanceof Date) {
+      playerJoinDate = new Date(joinedRow[1].getFullYear(), joinedRow[1].getMonth(), joinedRow[1].getDate());
+    }
+  }
+  
+  // Set date range
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  const actualStartDate = startDate || playerJoinDate || new Date('2020-01-01'); // Fallback if no profile
+  actualStartDate.setHours(0, 0, 0, 0);
+  
+  const actualEndDate = endDate || today;
+  actualEndDate.setHours(0, 0, 0, 0);
+  
+  console.log(`Processing daily data from ${formatDate(actualStartDate)} to ${formatDate(actualEndDate)}`);
+  
   // Get all games data
   const gamesData = gamesSheet.getRange(2, 1, gamesSheet.getLastRow() - 1, HEADERS.GAMES.length).getValues();
   const gamesByDate = {};
   
-  // Filter and group games by date
+  // Group games by date
   gamesData.forEach(row => {
     const endTime = row[8]; // End Time column
     if (!endTime || !(endTime instanceof Date)) return;
     
     const dateStr = formatDate(endTime);
+    const gameDate = new Date(endTime.getFullYear(), endTime.getMonth(), endTime.getDate());
     
-    // Apply date filtering if provided
-    if (startDate && endTime < startDate) return;
-    if (endDate && endTime > endDate) return;
+    // Filter by date range
+    if (gameDate < actualStartDate || gameDate > actualEndDate) return;
     
     if (!gamesByDate[dateStr]) {
       gamesByDate[dateStr] = [];
@@ -717,77 +740,162 @@ function processDailyData(startDate = null, endDate = null) {
     gamesByDate[dateStr].push(row);
   });
   
-  // Get existing daily data to avoid duplicates
-  const existingDailyData = dailySheet.getLastRow() > 1 ? 
-    dailySheet.getRange(2, 1, dailySheet.getLastRow() - 1, 1).getValues().flat() : [];
-  const existingDates = new Set(existingDailyData.map(date => date instanceof Date ? formatDate(date) : String(date)));
+  // Clear the daily sheet and rebuild completely for proper ordering
+  dailySheet.clear();
+  dailySheet.getRange(1, 1, 1, HEADERS.DAILY.length).setValues([HEADERS.DAILY]);
+  dailySheet.getRange(1, 1, 1, HEADERS.DAILY.length)
+    .setFontWeight('bold')
+    .setBackground('#ff6d01')
+    .setFontColor('white');
   
-  const newDailyRows = [];
+  // Generate complete date sequence (reverse chronological)
+  const allDates = [];
+  const currentDate = new Date(actualEndDate);
   
-  // Process each date
-  Object.keys(gamesByDate).sort().forEach(dateStr => {
-    if (existingDates.has(dateStr)) return; // Skip existing dates
+  while (currentDate >= actualStartDate) {
+    allDates.push(new Date(currentDate));
+    currentDate.setDate(currentDate.getDate() - 1);
+  }
+  
+  console.log(`Generated ${allDates.length} dates to process`);
+  
+  // First pass: Build ratings history going forward in time to establish last known ratings
+  const ratingHistory = {};
+  let globalLastKnownRatings = { bullet: '', blitz: '', rapid: '' };
+  
+  // Process games chronologically to build rating history
+  const sortedDates = allDates.slice().reverse(); // Forward chronological order
+  sortedDates.forEach(date => {
+    const dateStr = formatDate(date);
+    const dayGames = gamesByDate[dateStr] || [];
     
-    const dayGames = gamesByDate[dateStr];
+    const dayRatings = { bullet: '', blitz: '', rapid: '' };
+    
+    dayGames.forEach(game => {
+      const timeClass = String(game[5] || '').toLowerCase();
+      const myRating = parseFloat(game[10]) || 0;
+      
+      if (myRating > 0) {
+        if (timeClass === 'bullet') dayRatings.bullet = myRating;
+        else if (timeClass === 'blitz') dayRatings.blitz = myRating;
+        else if (timeClass === 'rapid') dayRatings.rapid = myRating;
+      }
+    });
+    
+    // Update global last known ratings
+    if (dayRatings.bullet !== '') globalLastKnownRatings.bullet = dayRatings.bullet;
+    if (dayRatings.blitz !== '') globalLastKnownRatings.blitz = dayRatings.blitz;
+    if (dayRatings.rapid !== '') globalLastKnownRatings.rapid = dayRatings.rapid;
+    
+    // Store the ending ratings for this date (either from games or carried forward)
+    ratingHistory[dateStr] = {
+      bullet: dayRatings.bullet !== '' ? dayRatings.bullet : globalLastKnownRatings.bullet,
+      blitz: dayRatings.blitz !== '' ? dayRatings.blitz : globalLastKnownRatings.blitz,
+      rapid: dayRatings.rapid !== '' ? dayRatings.rapid : globalLastKnownRatings.rapid
+    };
+  });
+  
+  const dailyRows = [];
+  
+  // Second pass: Process each date in reverse chronological order for display
+  allDates.forEach((date, index) => {
+    const dateStr = formatDate(date);
+    const dayGames = gamesByDate[dateStr] || [];
+    
     const stats = {
-      date: new Date(dateStr),
+      date: new Date(date),
       bullet: { win: 0, loss: 0, draw: 0, ratings: [], time: 0 },
       blitz: { win: 0, loss: 0, draw: 0, ratings: [], time: 0 },
       rapid: { win: 0, loss: 0, draw: 0, ratings: [], time: 0 },
       total: { games: dayGames.length, wins: 0, losses: 0, draws: 0, ratings: [], time: 0 }
     };
     
+    // Process games for this date
     dayGames.forEach(game => {
-      const timeClass = String(game[5] || '').toLowerCase(); // Time Class column
-      const result = String(game[14] || '').toLowerCase(); // Result column
-      const myRating = parseFloat(game[10]) || 0; // My Rating column
-      const duration = parseFloat(game[9]) || 0; // Game Duration column
+      const timeClass = String(game[5] || '').toLowerCase();
+      const result = String(game[14] || '').toLowerCase();
+      const myRating = parseFloat(game[10]) || 0;
+      const duration = parseFloat(game[9]) || 0;
       
-      // Categorize by time class
-      let category = 'total';
+      let category = null;
       if (timeClass === 'bullet') category = 'bullet';
       else if (timeClass === 'blitz') category = 'blitz';
       else if (timeClass === 'rapid') category = 'rapid';
       
-      // Count results
-      if (result === 'win') {
-        stats[category].win++;
-        stats.total.wins++;
-      } else if (result === 'loss') {
-        stats[category].loss++;
-        stats.total.losses++;
-      } else {
-        stats[category].draw++;
-        stats.total.draws++;
-      }
-      
-      // Collect ratings and time
-      if (myRating > 0) {
-        stats[category].ratings.push(myRating);
-        stats.total.ratings.push(myRating);
-      }
-      
-      if (duration > 0) {
-        stats[category].time += duration;
-        stats.total.time += duration;
+      if (category) {
+        // Count results
+        if (result === 'win') {
+          stats[category].win++;
+          stats.total.wins++;
+        } else if (result === 'loss') {
+          stats[category].loss++;
+          stats.total.losses++;
+        } else {
+          stats[category].draw++;
+          stats.total.draws++;
+        }
+        
+        if (myRating > 0) {
+          stats[category].ratings.push(myRating);
+          stats.total.ratings.push(myRating);
+        }
+        
+        if (duration > 0) {
+          stats[category].time += duration;
+          stats.total.time += duration;
+        }
       }
     });
     
-    // Calculate rating changes and averages for each time class
-    const bulletRating = stats.bullet.ratings.length > 0 ? stats.bullet.ratings[stats.bullet.ratings.length - 1] : '';
-    const blitzRating = stats.blitz.ratings.length > 0 ? stats.blitz.ratings[stats.blitz.ratings.length - 1] : '';
-    const rapidRating = stats.rapid.ratings.length > 0 ? stats.rapid.ratings[stats.rapid.ratings.length - 1] : '';
+    // Get ratings from history (these are already forward-filled)
+    const currentRatings = ratingHistory[dateStr] || { bullet: '', blitz: '', rapid: '' };
+    const bulletRating = currentRatings.bullet;
+    const blitzRating = currentRatings.blitz;
+    const rapidRating = currentRatings.rapid;
     
-    const bulletChange = stats.bullet.ratings.length > 1 ? 
-      stats.bullet.ratings[stats.bullet.ratings.length - 1] - stats.bullet.ratings[0] : '';
-    const blitzChange = stats.blitz.ratings.length > 1 ? 
-      stats.blitz.ratings[stats.blitz.ratings.length - 1] - stats.blitz.ratings[0] : '';
-    const rapidChange = stats.rapid.ratings.length > 1 ? 
-      stats.rapid.ratings[stats.rapid.ratings.length - 1] - stats.rapid.ratings[0] : '';
+    // Calculate rating changes: today's rating - yesterday's rating
+    let bulletChange = '';
+    let blitzChange = '';
+    let rapidChange = '';
+    let totalRatingChange = '';
     
-    const ratingSum = stats.total.ratings.reduce((sum, rating) => sum + rating, 0);
-    const totalRatingChange = stats.total.ratings.length > 1 ? 
-      stats.total.ratings[stats.total.ratings.length - 1] - stats.total.ratings[0] : '';
+    // Get previous day's ratings for comparison
+    if (index < allDates.length - 1) {
+      const previousDate = allDates[index + 1];
+      const previousDateStr = formatDate(previousDate);
+      const previousRatings = ratingHistory[previousDateStr] || { bullet: '', blitz: '', rapid: '' };
+      
+      if (bulletRating !== '' && previousRatings.bullet !== '') {
+        bulletChange = bulletRating - previousRatings.bullet;
+        // Only show change if it's not zero
+        if (bulletChange === 0) bulletChange = '';
+      }
+      if (blitzRating !== '' && previousRatings.blitz !== '') {
+        blitzChange = blitzRating - previousRatings.blitz;
+        if (blitzChange === 0) blitzChange = '';
+      }
+      if (rapidRating !== '' && previousRatings.rapid !== '') {
+        rapidChange = rapidRating - previousRatings.rapid;
+        if (rapidChange === 0) rapidChange = '';
+      }
+      
+      // Calculate total rating change: sum of all individual changes
+      const bulletChangeVal = typeof bulletChange === 'number' ? bulletChange : 0;
+      const blitzChangeVal = typeof blitzChange === 'number' ? blitzChange : 0;
+      const rapidChangeVal = typeof rapidChange === 'number' ? rapidChange : 0;
+      const totalChange = bulletChangeVal + blitzChangeVal + rapidChangeVal;
+      
+      if (totalChange !== 0) {
+        totalRatingChange = totalChange;
+      }
+    }
+    
+    // Calculate rating sum: simple sum of current ratings
+    const bulletRatingVal = typeof bulletRating === 'number' ? bulletRating : 0;
+    const blitzRatingVal = typeof blitzRating === 'number' ? blitzRating : 0;
+    const rapidRatingVal = typeof rapidRating === 'number' ? rapidRating : 0;
+    const ratingSum = bulletRatingVal + blitzRatingVal + rapidRatingVal;
+    
     const avgGameDuration = stats.total.time > 0 ? Math.round(stats.total.time / stats.total.games) : '';
     
     // Create the daily row
@@ -800,17 +908,17 @@ function processDailyData(startDate = null, endDate = null) {
       ratingSum, totalRatingChange, stats.total.time, avgGameDuration
     ];
     
-    newDailyRows.push(dailyRow);
+    dailyRows.push(dailyRow);
   });
   
-  // Add new daily rows to the sheet
-  if (newDailyRows.length > 0) {
-    dailySheet.getRange(dailySheet.getLastRow() + 1, 1, newDailyRows.length, HEADERS.DAILY.length)
-      .setValues(newDailyRows);
+  // Add all daily rows to the sheet
+  if (dailyRows.length > 0) {
+    dailySheet.getRange(2, 1, dailyRows.length, HEADERS.DAILY.length)
+      .setValues(dailyRows);
   }
   
-  console.log(`Processed daily data: ${newDailyRows.length} new daily summaries`);
-  return newDailyRows.length;
+  console.log(`Processed daily data: ${dailyRows.length} daily summaries (${Object.keys(gamesByDate).length} days with games)`);
+  return dailyRows.length;
 }
 
 /**
