@@ -14,7 +14,7 @@ const SHEETS = {
 
 const HEADERS = {
   CONFIG: ['Setting', 'Value', 'Description'],
-  ARCHIVES: ['Archive URL', 'Year-Month', 'Status', 'Last Updated'],
+  ARCHIVES: ['Archive URL', 'Year-Month', 'Last Updated'],
   GAMES: [
     'Game URL',
     'Time Control',
@@ -89,8 +89,7 @@ function setupSheets() {
   
   const configData = [
     ['Username', existingUsername || 'Enter your username here', 'Your Chess.com username'],
-    ['Last Daily Fetch', '', 'Last date daily data was fetched'],
-    ['Auto Archive Status', 'true', 'Automatically update archive status based on month completion']
+    ['Last Daily Fetch', '', 'Last date daily data was fetched']
   ];
   
   configSheet.getRange(2, 1, configData.length, 3).setValues(configData);
@@ -227,28 +226,7 @@ function fetchArchives(username) {
 }
 
 /**
- * Determines if an archive is active based on current date and month completion
- */
-function isArchiveActive(archiveUrl) {
-  try {
-    const urlParts = archiveUrl.split('/');
-    const year = parseInt(urlParts[urlParts.length - 2]);
-    const month = parseInt(urlParts[urlParts.length - 1]);
-    
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const currentMonth = now.getMonth() + 1;
-    
-    // Archive is active if it's the current month/year or future
-    return (year > currentYear) || (year === currentYear && month >= currentMonth);
-  } catch (error) {
-    console.error('Error determining archive status:', error);
-    return false;
-  }
-}
-
-/**
- * Updates the archives sheet with archive URLs and their status
+ * Updates the archives sheet with archive URLs
  */
 function updateArchivesSheet(archives) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -256,7 +234,7 @@ function updateArchivesSheet(archives) {
   
   // Get existing archives
   const existingData = archivesSheet.getLastRow() > 1 ? 
-    archivesSheet.getRange(2, 1, archivesSheet.getLastRow() - 1, 4).getValues() : [];
+    archivesSheet.getRange(2, 1, archivesSheet.getLastRow() - 1, 3).getValues() : [];
   
   const existingArchives = new Set(existingData.map(row => row[0]));
   const newArchives = [];
@@ -266,40 +244,61 @@ function updateArchivesSheet(archives) {
   archives.forEach((archiveUrl) => {
     const urlParts = archiveUrl.split('/');
     const yearMonth = urlParts[urlParts.length - 2] + '-' + urlParts[urlParts.length - 1];
-    const status = isArchiveActive(archiveUrl) ? 'Active' : 'Inactive';
     
     if (!existingArchives.has(archiveUrl)) {
-      newArchives.push([archiveUrl, yearMonth, status, currentDate]);
+      newArchives.push([archiveUrl, yearMonth, currentDate]);
     } else {
-      // Update status of existing archives
+      // Update last updated date for existing archives
       const existingRowIndex = existingData.findIndex(row => row[0] === archiveUrl);
       if (existingRowIndex !== -1) {
-        archivesSheet.getRange(existingRowIndex + 2, 3).setValue(status);
-        archivesSheet.getRange(existingRowIndex + 2, 4).setValue(currentDate);
+        archivesSheet.getRange(existingRowIndex + 2, 3).setValue(currentDate);
       }
     }
   });
   
   // Add new archives
   if (newArchives.length > 0) {
-    archivesSheet.getRange(archivesSheet.getLastRow() + 1, 1, newArchives.length, 4)
+    archivesSheet.getRange(archivesSheet.getLastRow() + 1, 1, newArchives.length, 3)
       .setValues(newArchives);
   }
   
-  return archives.filter(url => isArchiveActive(url));
+  return archives;
 }
 
 /**
- * Gets active archives from the archives sheet
+ * Gets all archives from the archives sheet
  */
-function getActiveArchives() {
+function getAllArchives() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const archivesSheet = ss.getSheetByName(SHEETS.ARCHIVES);
   
   if (archivesSheet.getLastRow() <= 1) return [];
   
-  const archivesData = archivesSheet.getRange(2, 1, archivesSheet.getLastRow() - 1, 4).getValues();
-  return archivesData.filter(row => row[2] === 'Active').map(row => row[0]);
+  const archivesData = archivesSheet.getRange(2, 1, archivesSheet.getLastRow() - 1, 3).getValues();
+  return archivesData.map(row => row[0]);
+}
+
+/**
+ * Gets the most recent archive (current month)
+ */
+function getCurrentArchive() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const archivesSheet = ss.getSheetByName(SHEETS.ARCHIVES);
+  
+  if (archivesSheet.getLastRow() <= 1) return null;
+  
+  const archivesData = archivesSheet.getRange(2, 1, archivesSheet.getLastRow() - 1, 3).getValues();
+  
+  // Sort by year-month and get the most recent
+  const sortedArchives = archivesData.sort((a, b) => {
+    const [yearA, monthA] = a[1].split('-').map(Number);
+    const [yearB, monthB] = b[1].split('-').map(Number);
+    
+    if (yearA !== yearB) return yearB - yearA;
+    return monthB - monthA;
+  });
+  
+  return sortedArchives.length > 0 ? sortedArchives[0][0] : null;
 }
 
 /**
@@ -956,31 +955,73 @@ function updatePlayerProfile(profile) {
 }
 
 /**
- * Main function to fetch all new games from active archives
+ * Fetches games from current month archive only
  */
-function fetchAllNewGames() {
+function fetchCurrentMonthGames() {
   const startTime = new Date().getTime();
   let username = '';
   
   try {
     username = getUsername();
-    console.log(`Starting game fetch for user: ${username}`);
+    console.log(`Starting current month game fetch for user: ${username}`);
     
-    // Get active archives
-    const activeArchives = getActiveArchives();
-    console.log(`Found ${activeArchives.length} active archives`);
+    const currentArchive = getCurrentArchive();
+    if (!currentArchive) {
+      logExecution('fetchCurrentMonthGames', username, 'WARNING', new Date().getTime() - startTime, 'No current archive found');
+      SpreadsheetApp.getActiveSpreadsheet().toast('No current archive found. Run updateArchives() first.', 'Warning', 5);
+      return;
+    }
     
-    if (activeArchives.length === 0) {
-      logExecution('fetchAllNewGames', username, 'WARNING', new Date().getTime() - startTime, 'No active archives found');
-      SpreadsheetApp.getActiveSpreadsheet().toast('No active archives found. Run updateArchives() first.', 'Warning', 5);
+    console.log(`Fetching games from current archive: ${currentArchive}`);
+    const games = fetchGamesFromArchive(currentArchive);
+    console.log(`Retrieved ${games.length} games from current archive`);
+    
+    // Add new games to the sheet
+    const totalNewGames = addNewGames(games, username);
+    
+    const executionTime = new Date().getTime() - startTime;
+    const notes = `Current archive: ${currentArchive}, Total games: ${games.length}, New games: ${totalNewGames}`;
+    
+    logExecution('fetchCurrentMonthGames', username, 'SUCCESS', executionTime, notes);
+    
+    const message = `Current month game fetch completed!\n\nArchive: ${currentArchive}\nTotal games retrieved: ${games.length}\nNew games added: ${totalNewGames}\nExecution time: ${Math.round(executionTime/1000)}s`;
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Fetch Complete', 8);
+    
+  } catch (error) {
+    const executionTime = new Date().getTime() - startTime;
+    console.error('Error in fetchCurrentMonthGames:', error);
+    logExecution('fetchCurrentMonthGames', username, 'ERROR', executionTime, error.message);
+    SpreadsheetApp.getActiveSpreadsheet().toast(`Error: ${error.message}`, 'Fetch Error', 10);
+    throw error;
+  }
+}
+
+/**
+ * Main function to fetch all games from all archives
+ */
+function fetchAllGames() {
+  const startTime = new Date().getTime();
+  let username = '';
+  
+  try {
+    username = getUsername();
+    console.log(`Starting full game fetch for user: ${username}`);
+    
+    // Get all archives
+    const allArchives = getAllArchives();
+    console.log(`Found ${allArchives.length} total archives`);
+    
+    if (allArchives.length === 0) {
+      logExecution('fetchAllGames', username, 'WARNING', new Date().getTime() - startTime, 'No archives found');
+      SpreadsheetApp.getActiveSpreadsheet().toast('No archives found. Run updateArchives() first.', 'Warning', 5);
       return;
     }
     
     let totalNewGames = 0;
     const allGames = [];
     
-    // Fetch games from each active archive
-    for (const archiveUrl of activeArchives) {
+    // Fetch games from each archive
+    for (const archiveUrl of allArchives) {
       console.log(`Fetching games from: ${archiveUrl}`);
       const games = fetchGamesFromArchive(archiveUrl);
       allGames.push(...games);
@@ -996,17 +1037,17 @@ function fetchAllNewGames() {
     totalNewGames = addNewGames(allGames, username);
     
     const executionTime = new Date().getTime() - startTime;
-    const notes = `Archives checked: ${activeArchives.length}, Total games: ${allGames.length}, New games: ${totalNewGames}`;
+    const notes = `Archives checked: ${allArchives.length}, Total games: ${allGames.length}, New games: ${totalNewGames}`;
     
-    logExecution('fetchAllNewGames', username, 'SUCCESS', executionTime, notes);
+    logExecution('fetchAllGames', username, 'SUCCESS', executionTime, notes);
     
-    const message = `Game fetch completed!\n\nArchives checked: ${activeArchives.length}\nTotal games retrieved: ${allGames.length}\nNew games added: ${totalNewGames}\nExecution time: ${Math.round(executionTime/1000)}s`;
+    const message = `Full game fetch completed!\n\nArchives checked: ${allArchives.length}\nTotal games retrieved: ${allGames.length}\nNew games added: ${totalNewGames}\nExecution time: ${Math.round(executionTime/1000)}s`;
     SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Fetch Complete', 8);
     
   } catch (error) {
     const executionTime = new Date().getTime() - startTime;
-    console.error('Error in fetchAllNewGames:', error);
-    logExecution('fetchAllNewGames', username, 'ERROR', executionTime, error.message);
+    console.error('Error in fetchAllGames:', error);
+    logExecution('fetchAllGames', username, 'ERROR', executionTime, error.message);
     SpreadsheetApp.getActiveSpreadsheet().toast(`Error: ${error.message}`, 'Fetch Error', 10);
     throw error;
   }
@@ -1026,15 +1067,15 @@ function updateArchives() {
     const archives = fetchArchives(username);
     console.log(`Retrieved ${archives.length} archives`);
     
-    const activeArchives = updateArchivesSheet(archives);
-    console.log(`${activeArchives.length} archives are currently active`);
+    updateArchivesSheet(archives);
+    console.log(`Archives sheet updated with ${archives.length} archives`);
     
     const executionTime = new Date().getTime() - startTime;
-    const notes = `Total archives: ${archives.length}, Active: ${activeArchives.length}`;
+    const notes = `Total archives: ${archives.length}`;
     
     logExecution('updateArchives', username, 'SUCCESS', executionTime, notes);
     
-    const message = `Archives updated!\n\nTotal archives: ${archives.length}\nActive archives: ${activeArchives.length}\nExecution time: ${Math.round(executionTime/1000)}s`;
+    const message = `Archives updated!\n\nTotal archives: ${archives.length}\nExecution time: ${Math.round(executionTime/1000)}s`;
     SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Archives Updated', 5);
     
   } catch (error) {
@@ -1133,7 +1174,76 @@ function updateDailyData() {
 }
 
 /**
- * Complete update - runs all update functions in sequence
+ * Quick update - runs current month games, daily data, stats, and profile
+ */
+function quickUpdate() {
+  const startTime = new Date().getTime();
+  let username = '';
+  const results = [];
+  
+  try {
+    username = getUsername();
+    console.log(`Starting quick update for user: ${username}`);
+    
+    // Update archives first
+    try {
+      updateArchives();
+      results.push('✓ Archives updated');
+    } catch (error) {
+      results.push('✗ Archives failed: ' + error.message);
+    }
+    
+    // Fetch current month games
+    try {
+      fetchCurrentMonthGames();
+      results.push('✓ Current month games fetched');
+    } catch (error) {
+      results.push('✗ Current month games failed: ' + error.message);
+    }
+    
+    // Update daily data
+    try {
+      updateDailyData();
+      results.push('✓ Daily data processed');
+    } catch (error) {
+      results.push('✗ Daily data failed: ' + error.message);
+    }
+    
+    // Update stats
+    try {
+      updateStats();
+      results.push('✓ Stats updated');
+    } catch (error) {
+      results.push('✗ Stats failed: ' + error.message);
+    }
+    
+    // Update profile
+    try {
+      updateProfile();
+      results.push('✓ Profile updated');
+    } catch (error) {
+      results.push('✗ Profile failed: ' + error.message);
+    }
+    
+    const executionTime = new Date().getTime() - startTime;
+    const notes = results.join(', ');
+    
+    logExecution('quickUpdate', username, 'SUCCESS', executionTime, notes);
+    
+    const message = `Quick update finished!\n\n${results.join('\n')}\n\nTotal execution time: ${Math.round(executionTime/1000)}s`;
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Quick Update Done', 10);
+    
+  } catch (error) {
+    const executionTime = new Date().getTime() - startTime;
+    console.error('Error in quickUpdate:', error);
+    logExecution('quickUpdate', username, 'ERROR', executionTime, error.message);
+    SpreadsheetApp.getActiveSpreadsheet().toast(`Error: ${error.message}`, 'Quick Update Error', 10);
+    throw error;
+  }
+}
+
+/**
+ * Complete update - runs all update functions including full game fetch
  */
 function completeUpdate() {
   const startTime = new Date().getTime();
@@ -1152,12 +1262,12 @@ function completeUpdate() {
       results.push('✗ Archives failed: ' + error.message);
     }
     
-    // Fetch new games
+    // Fetch all games
     try {
-      fetchAllNewGames();
-      results.push('✓ Games fetched');
+      fetchAllGames();
+      results.push('✓ All games fetched');
     } catch (error) {
-      results.push('✗ Games failed: ' + error.message);
+      results.push('✗ All games failed: ' + error.message);
     }
     
     // Update daily data
