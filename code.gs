@@ -9,7 +9,8 @@ const SHEETS = {
   DAILY: 'Daily Data',
   STATS: 'Player Stats',
   PROFILE: 'Player Profile',
-  LOGS: 'Execution Logs'
+  LOGS: 'Execution Logs',
+  OPENINGS: 'OpeningURL'
 };
 
 const HEADERS = {
@@ -56,7 +57,8 @@ const HEADERS = {
   ],
   LOGS: ['Timestamp', 'Function', 'Username', 'Status', 'Execution Time (ms)', 'Notes'],
   STATS: ['Pulled At'], // Dynamic headers will be added based on API response
-  PROFILE: ['Field', 'Value'] // Will be populated dynamically
+  PROFILE: ['Field', 'Value'], // Will be populated dynamically
+  OPENINGS: ['Opening Name', 'URL'] // Column A: Opening names, Column B: URLs
 };
 
 /**
@@ -101,7 +103,8 @@ function setupSheets() {
     { name: SHEETS.DAILY, headers: HEADERS.DAILY, color: '#ff6d01' },
     { name: SHEETS.STATS, headers: HEADERS.STATS, color: '#fbbc04' },
     { name: SHEETS.PROFILE, headers: HEADERS.PROFILE, color: '#9c27b0' },
-    { name: SHEETS.LOGS, headers: HEADERS.LOGS, color: '#34a853' }
+    { name: SHEETS.LOGS, headers: HEADERS.LOGS, color: '#34a853' },
+    { name: SHEETS.OPENINGS, headers: HEADERS.OPENINGS, color: '#e91e63' }
   ];
   
   sheetsToCheck.forEach(sheetInfo => {
@@ -153,6 +156,44 @@ function setupSheets() {
     SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Setup Complete', 10);
   } else {
     SpreadsheetApp.getActiveSpreadsheet().toast('All sheets are up to date!', 'Setup Complete', 3);
+  }
+}
+
+/**
+ * Looks up opening name from OpeningURL sheet based on ECO URL
+ */
+function lookupOpeningName(ecoUrl) {
+  if (!ecoUrl) return '';
+  
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const openingsSheet = ss.getSheetByName(SHEETS.OPENINGS);
+    
+    if (!openingsSheet || openingsSheet.getLastRow() <= 1) {
+      console.log('OpeningURL sheet not found or empty, using PGN opening name');
+      return '';
+    }
+    
+    // Get all data from OpeningURL sheet
+    const openingsData = openingsSheet.getRange(2, 1, openingsSheet.getLastRow() - 1, 2).getValues();
+    
+    // Look for a matching URL
+    for (const row of openingsData) {
+      const openingName = row[0];
+      const openingUrl = row[1];
+      
+      if (openingUrl && ecoUrl && String(ecoUrl).includes(String(openingUrl))) {
+        console.log(`Found opening match: ${openingName} for URL: ${ecoUrl}`);
+        return openingName;
+      }
+    }
+    
+    console.log(`No opening match found for URL: ${ecoUrl}`);
+    return '';
+    
+  } catch (error) {
+    console.error('Error looking up opening name:', error);
+    return '';
   }
 }
 
@@ -392,9 +433,7 @@ function parseTimeControl(timeControl) {
   }
 }
 
-/**
- * Parses PGN string to extract metadata
- */
+// FIXED: Enhanced parsePGN function to better handle opening URLs
 function parsePGN(pgnString) {
   if (!pgnString) return {};
   
@@ -431,9 +470,16 @@ function parsePGN(pgnString) {
           else if (key === 'site') result.site = value;
           else if (key === 'date') result.date = value;
           else if (key === 'round') result.round = value;
-          else if (key === 'opening') result.opening = value;
+          else if (key === 'opening') {
+            result.opening = value;
+            // FIXED: Generate opening URL based on opening name
+            if (value) {
+              result.ecoUrl = generateOpeningUrl(value);
+            }
+          }
           else if (key === 'eco') result.eco = value;
-          else if (key === 'ecourl') result.ecoUrl = value;
+          // FIXED: Check multiple possible URL field names
+          else if (key === 'ecourl' || key === 'openingurl' || key === 'link') result.ecoUrl = value;
           else if (key === 'termination') result.termination = value;
           else if (key === 'utcdate') result.utcDate = value;
           else if (key === 'utctime') result.utcTime = value;
@@ -450,6 +496,50 @@ function parsePGN(pgnString) {
   }
   
   return result;
+}
+
+// FIXED: New function to generate Chess.com opening URL from opening name
+function generateOpeningUrl(openingName) {
+  if (!openingName) return '';
+  
+  try {
+    // Convert opening name to Chess.com URL format
+    // Remove common variations and clean the name
+    let cleanName = openingName
+      .replace(/\s*\([^)]*\)/g, '') // Remove parentheses content
+      .replace(/\s*:\s*/g, '-') // Replace colons with dashes
+      .replace(/\s+/g, '-') // Replace spaces with dashes
+      .replace(/[^a-zA-Z0-9\-]/g, '') // Remove special characters except dashes
+      .replace(/-+/g, '-') // Replace multiple dashes with single dash
+      .replace(/^-|-$/g, '') // Remove leading/trailing dashes
+      .toLowerCase();
+    
+    // Handle common opening name mappings
+    const openingMappings = {
+      'french-defense': 'French-Defense',
+      'sicilian-defense': 'Sicilian-Defense',
+      'queens-gambit': 'Queens-Gambit',
+      'kings-indian-defense': 'Kings-Indian-Defense',
+      'english-opening': 'English-Opening',
+      'ruy-lopez': 'Ruy-Lopez',
+      'italian-game': 'Italian-Game',
+      'queens-indian-defense': 'Queens-Indian-Defense',
+      'nimzo-indian-defense': 'Nimzo-Indian-Defense',
+      'alekhine-defense': 'Alekhine-Defense'
+    };
+    
+    // Use mapping if available, otherwise use cleaned name with proper capitalization
+    const urlName = openingMappings[cleanName] || 
+      cleanName.split('-')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join('-');
+    
+    return `https://www.chess.com/openings/${urlName}`;
+    
+  } catch (error) {
+    console.error('Error generating opening URL:', error);
+    return '';
+  }
 }
 
 /**
@@ -605,6 +695,12 @@ function gameToRow(game, username) {
   const playerData = getPlayerPerspective(game, username);
   const duration = computeGameDuration(metadata.startTime, metadata.endTime, metadata.utcDate, metadata.endDate);
   
+  // Try to get opening name from OpeningURL sheet first, fallback to PGN opening
+  let openingName = lookupOpeningName(metadata.ecoUrl);
+  if (!openingName) {
+    openingName = metadata.opening || '';
+  }
+  
   return [
     game.url || '',
     game.time_control || '',
@@ -626,7 +722,7 @@ function gameToRow(game, username) {
     metadata.site || '',
     metadata.date || '',
     metadata.round || '',
-    metadata.opening || '',
+    openingName, // Use the looked up opening name
     metadata.eco || '',
     metadata.ecoUrl || '',
     metadata.utcDate || '',
