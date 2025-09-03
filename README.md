@@ -6,7 +6,7 @@ This Apps Script automates your daily sheet roll at local midnight, adds compute
 
 - Inserts a new daily row at the top of `Daily` at 12:00 am local time with the date in column `A`
 - Copies the prior top row's live formulas into the new row
-- Flushes calculations and converts all rows below the new date into static values
+- Flushes calculations, runs an optional `quickUpdate()` hook, then converts all rows below the new date into static values
 - Adds/maintains in `Game Data` the following columns:
   - **Date**: local date floor of `End Time` (no time)
   - **ResultBinary**: 1 for win, 0.5 for draw, 0 for loss (robust text match)
@@ -39,6 +39,7 @@ This Apps Script automates your daily sheet roll at local midnight, adds compute
 - `ResultBinary` recognizes common result text. If your sheet uses different labels, adjust the regex in `ensureGameDataComputedColumns`.
 - `RATING_CHANGE` should be placed in row 2 of the `RatingChange` column by the setup function. It returns a column of deltas aligned with your data rows.
 - The Date and ResultBinary columns use a single `ARRAYFORMULA` in row 1 to populate the entire column (including the header cell).
+- To auto-fetch external data during the daily roll, define a global `quickUpdate()` function in Apps Script; it will be invoked after formulas are inserted and before older rows are frozen.
 
 ### Manual use
 

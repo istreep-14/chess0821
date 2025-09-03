@@ -110,8 +110,9 @@ function dailyRoll() {
     }
   }
 
-  // Force calculation, then convert all rows below the new date to static values
+  // Force calculation and run quick update hook if available
   SpreadsheetApp.flush();
+  tryQuickUpdate();
 
   const newLastRow = daily.getLastRow();
   if (newLastRow >= headerRow + 2) {
@@ -273,5 +274,24 @@ function columnToLetter(column) {
     col = Math.floor((col - rem) / 26);
   }
   return temp;
+}
+
+/**
+ * If a global function named quickUpdate exists, call it to refresh external data.
+ * This allows the daily roll to also trigger any user-defined fetch/update logic.
+ */
+function tryQuickUpdate() {
+  try {
+    // Using typeof avoids ReferenceError if quickUpdate is not declared
+    if (typeof quickUpdate === 'function') {
+      quickUpdate();
+      SpreadsheetApp.flush();
+    }
+  } catch (err) {
+    // Swallow errors to keep daily roll resilient
+    try {
+      console && console.warn && console.warn('quickUpdate failed:', err);
+    } catch (e) {}
+  }
 }
 
