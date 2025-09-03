@@ -29,6 +29,10 @@ const HEADERS = {
     'Method', 'Event', 'Site', 'Date', 'Round', 'Opening', 'ECO',
     'ECO URL', 'UTC Date', 'UTC Time', 'PGN Start Time', 'PGN End Date', 'PGN End Time',
     'Current Position', 'Full PGN', 'Moves', 'Times', 'Moves Per Side',
+    'PGN Timezone', 'My Timezone', 'Local Start Time (Live)', 'Hour Differential (hrs)',
+    'My Username', 'Rating Change', 'My Player ID', 'My UUID',
+    'Opponent Color', 'Opponent Username', 'Opponent Player ID', 'Opponent UUID',
+    'My Accuracy', 'Opponent Accuracy',
     'Opening from URL', 'Opening from ECO'
   ],
   DAILY: [
@@ -304,6 +308,56 @@ function extractPgnTags(pgn) {
   return tags;
 }
 
+function getLocalTimezoneName() {
+  const date = new Date();
+  const match = date.toString().match(/\(([^)]+)\)$/);
+  return match && match[1] ? match[1] : '';
+}
+
+function getLocalTimezoneOffsetHours(date) {
+  const offsetMinutes = date.getTimezoneOffset();
+  return -offsetMinutes / 60; // JavaScript offset is minutes behind UTC; invert to get UTC+/- hours
+}
+
+function parsePgnTimezone(tags) {
+  // PGN often provides UTCDate/UTCTime; assume 'UTC' when present
+  if (tags && (tags.UTCDate || tags.UTCTime)) return 'UTC';
+  // Some PGNs may include TimeZone or Zone tags
+  if (tags && (tags.TimeZone || tags.Zone)) return tags.TimeZone || tags.Zone;
+  return '';
+}
+
+function computeLocalStartTimeForLive(game, tags) {
+  // Live games: prefer game.start_time (epoch seconds). If missing, derive from PGN UTCDate/UTCTime
+  try {
+    if (game && game.time_class && game.time_class !== 'daily') {
+      if (game.start_time) return new Date(game.start_time * 1000);
+      if (tags && tags.UTCDate && tags.UTCTime) {
+        const iso = tags.UTCDate + 'T' + tags.UTCTime + 'Z';
+        const d = new Date(iso);
+        if (!isNaN(d.getTime())) return d; // local Date object will reflect local tz automatically when displayed in Sheets
+      }
+      if (tags && tags.Date && tags.StartTime) {
+        // Fallback if only Date and StartTime without zone; treat as UTC to be safe
+        const d = new Date(tags.Date + 'T' + tags.StartTime + 'Z');
+        if (!isNaN(d.getTime())) return d;
+      }
+    }
+  } catch (e) {}
+  return '';
+}
+
+function computeHourDifferential(pgnTz, localDate) {
+  try {
+    if (!localDate || !(localDate instanceof Date)) return '';
+    const localOffset = getLocalTimezoneOffsetHours(localDate);
+    const pgnOffset = (pgnTz && pgnTz.toUpperCase() === 'UTC') ? 0 : null;
+    if (pgnOffset === null) return '';
+    const diff = localOffset - pgnOffset;
+    return Math.round(diff * 100) / 100;
+  } catch (e) { return ''; }
+}
+
 function extractMovesFromPgn(pgn) {
   if (!pgn) return { moves: '', times: '', movesPerSide: '' };
   const blankLineIndex = pgn.indexOf('\n\n');
@@ -362,6 +416,11 @@ function gameToRow(game, username) {
 
   const endEpoch = game.end_time || (tags.EndTime ? Date.parse(tags.EndDate + ' ' + tags.EndTime) / 1000 : '');
   const startEpoch = game.start_time || '';
+  // Timezone/context values
+  const pgnTimezone = parsePgnTimezone(tags);
+  const localStartTime = computeLocalStartTimeForLive(game, tags);
+  const myTimezone = getLocalTimezoneName();
+  const hourDifferential = computeHourDifferential(pgnTimezone, localStartTime || (endEpoch ? new Date(endEpoch * 1000) : null));
 
   const row = [];
   const push = (v) => row.push(v === undefined ? '' : v);
@@ -399,6 +458,37 @@ function gameToRow(game, username) {
   push(mv.moves);
   push(mv.times);
   push(mv.movesPerSide);
+  // New timezone/identity columns
+  push(pgnTimezone);
+  push(myTimezone);
+  push(localStartTime || '');
+  push(hourDifferential);
+
+  // Identity fields and stats
+  const myUsername = my && my.username ? my.username : '';
+  const myId = my && (my.player_id || my.playerId || my.id) ? (my.player_id || my.playerId || my.id) : '';
+  const myUuid = my && (my.uuid || my.uuid4 || my.guid) ? (my.uuid || my.uuid4 || my.guid) : '';
+  const oppColor = myColor === 'white' ? 'black' : (myColor === 'black' ? 'white' : '');
+  const oppUsername = opp && opp.username ? opp.username : '';
+  const oppId = opp && (opp.player_id || opp.playerId || opp.id) ? (opp.player_id || opp.playerId || opp.id) : '';
+  const oppUuid = opp && (opp.uuid || opp.uuid4 || opp.guid) ? (opp.uuid || opp.uuid4 || opp.guid) : '';
+
+  // Rating change (not always available in archives) – leave blank if unknown
+  let ratingChange = '';
+  // Accuracies from PGN tags if present
+  const myAccuracy = (myColor === 'white') ? (tags.WhiteAccuracy || '') : (tags.BlackAccuracy || '');
+  const oppAccuracy = (myColor === 'white') ? (tags.BlackAccuracy || '') : (tags.WhiteAccuracy || '');
+
+  push(myUsername);
+  push(ratingChange);
+  push(myId);
+  push(myUuid);
+  push(oppColor);
+  push(oppUsername);
+  push(oppId);
+  push(oppUuid);
+  push(myAccuracy);
+  push(oppAccuracy);
   push(''); // Opening from URL (to be filled by categorize)
   push(''); // Opening from ECO (to be filled by categorize)
 
