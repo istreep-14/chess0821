@@ -572,7 +572,6 @@ function gameToRow(game, username) {
   push(hourDifferential);
 
   // Identity fields and stats
-  const myUsername = myUsername;
   const myId = my && (my.player_id || my.playerId || my.id) ? (my.player_id || my.playerId || my.id) : '';
   const myUuid = my && (my.uuid || my.uuid4 || my.guid) ? (my.uuid || my.uuid4 || my.guid) : '';
   const oppColor = myColor === 'white' ? 'black' : (myColor === 'black' ? 'white' : '');
