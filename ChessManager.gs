@@ -733,7 +733,12 @@ function updateDailyData() {
 
   const dailyMap = new Map();
 
-  function keyFor(date) { return date.toISOString().slice(0, 10); }
+  function keyFor(date) {
+    const y = date.getFullYear();
+    const m = (date.getMonth() + 1).toString().padStart(2, '0');
+    const d = date.getDate().toString().padStart(2, '0');
+    return y + '-' + m + '-' + d; // Local day key
+  }
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -751,9 +756,9 @@ function updateDailyData() {
     const dKey = keyFor(dt);
     if (!dailyMap.has(dKey)) {
       dailyMap.set(dKey, {
-        bullet: { w: 0, l: 0, d: 0, rating: 0, change: 0, time: 0 },
-        blitz:  { w: 0, l: 0, d: 0, rating: 0, change: 0, time: 0 },
-        rapid:  { w: 0, l: 0, d: 0, rating: 0, change: 0, time: 0 },
+        bullet: { w: 0, l: 0, d: 0, rating: 0, change: 0, time: 0, firstTime: null, firstRating: null, lastTime: null, lastRating: null },
+        blitz:  { w: 0, l: 0, d: 0, rating: 0, change: 0, time: 0, firstTime: null, firstRating: null, lastTime: null, lastRating: null },
+        rapid:  { w: 0, l: 0, d: 0, rating: 0, change: 0, time: 0, firstTime: null, firstRating: null, lastTime: null, lastRating: null },
         totals: { g: 0, w: 0, l: 0, d: 0, ratingSum: 0, change: 0, time: 0 }
       });
     }
@@ -763,8 +768,17 @@ function updateDailyData() {
       if (result === 'Win') agg[bucket].w += 1;
       else if (result === 'Loss') agg[bucket].l += 1;
       else if (result === 'Draw') agg[bucket].d += 1;
-      // naive: set rating as last seen of the day per class
-      agg[bucket].rating = rating || agg[bucket].rating;
+      // Track first and last known rating within the local day
+      if (isFinite(rating) && rating > 0) {
+        if (agg[bucket].firstTime === null || dt < agg[bucket].firstTime) {
+          agg[bucket].firstTime = dt;
+          agg[bucket].firstRating = rating;
+        }
+        if (agg[bucket].lastTime === null || dt > agg[bucket].lastTime) {
+          agg[bucket].lastTime = dt;
+          agg[bucket].lastRating = rating;
+        }
+      }
       agg[bucket].time += dur;
     }
     agg.totals.g += 1;
@@ -780,10 +794,23 @@ function updateDailyData() {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
     const a = dailyMap.get(k);
-    const totalChange = a.totals.change; // keep 0 for now
+    // Compute per-class end-of-day rating and change based on first/last known ratings
+    const classes = ['bullet', 'blitz', 'rapid'];
+    let totalChange = 0;
+    for (let ci = 0; ci < classes.length; ci++) {
+      const cls = classes[ci];
+      const bucket = a[cls];
+      bucket.rating = (bucket.lastRating !== null && bucket.lastRating !== undefined) ? bucket.lastRating : 0;
+      bucket.change = (bucket.firstRating !== null && bucket.firstRating !== undefined && bucket.lastRating !== null && bucket.lastRating !== undefined)
+        ? (bucket.lastRating - bucket.firstRating)
+        : 0;
+      totalChange += bucket.change;
+    }
+    const parts = k.split('-');
+    const localDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
     const avgDur = a.totals.g > 0 ? a.totals.time / a.totals.g : 0;
     rows.push([
-      new Date(k),
+      localDate,
       a.bullet.w, a.bullet.l, a.bullet.d, a.bullet.rating, a.bullet.change, a.bullet.time,
       a.blitz.w,  a.blitz.l,  a.blitz.d,  a.blitz.rating,  a.blitz.change,  a.blitz.time,
       a.rapid.w,  a.rapid.l,  a.rapid.d,  a.rapid.rating,  a.rapid.change,  a.rapid.time,
