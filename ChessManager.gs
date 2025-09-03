@@ -26,7 +26,7 @@ const HEADERS = {
     'Game URL', 'Time Control', 'Base Time (min)', 'Increment (sec)', 'Rated',
     'Time Class', 'Rules', 'Format', 'End Time', 'Game Duration (sec)',
     'My Rating', 'My Color', 'Opponent', 'Opponent Rating', 'Result',
-    'Method', 'Event', 'Site', 'Date', 'Round', 'Opening', 'ECO',
+    'Termination', 'Winner', 'Event', 'Site', 'Date', 'Round', 'Opening', 'ECO',
     'ECO URL', 'UTC Date', 'UTC Time', 'PGN Start Time', 'PGN End Date', 'PGN End Time',
     'Current Position', 'Full PGN', 'Moves', 'Times', 'Moves Per Side',
     'PGN Timezone', 'My Timezone', 'Local Start Time (Live)', 'Hour Differential (hrs)',
@@ -272,29 +272,67 @@ function simplifyResult(result) {
   return 'Loss';
 }
 
-function normalizeMethod(myResultRaw, terminationTag) {
-  const val = (myResultRaw || '').toString().toLowerCase();
+function normalizeMethod(causeCandidate, terminationTag) {
+  const val = (causeCandidate || '').toString().toLowerCase();
   const term = (terminationTag || '').toString().toLowerCase();
   const map = {
-    checkmated: 'Checkmate',
-    resigned: 'Resignation',
+    checkmated: 'Checkmated',
+    checkmate: 'Checkmated',
+    resigned: 'Resigned',
     timeout: 'Timeout',
     abandoned: 'Abandoned',
     stalemate: 'Stalemate',
-    agreed: 'Agreed Draw',
-    repetition: 'Repetition',
-    insufficient: 'Insufficient Material',
-    '50move': '50-move Rule',
-    timevsinsufficient: 'Time vs Insufficient Material',
+    agreed: 'Draw agreed',
+    repetition: 'Draw by repetition',
+    insufficient: 'Insufficient material',
+    '50move': 'Draw by 50-move rule',
+    timevsinsufficient: 'Draw by timeout vs insufficient material',
+    kingofthehill: 'Opponent king reached the hill',
+    threecheck: 'Checked for the 3rd time',
+    bughousepartnerlose: 'Bughouse partner lost',
     '': ''
   };
   if (map[val]) return map[val];
-  // Try termination tag
+  // Try to infer from termination phrase
   const keys = Object.keys(map);
   for (let i = 0; i < keys.length; i++) {
     if (keys[i] && term.indexOf(keys[i]) !== -1) return map[keys[i]];
   }
   return term ? term.charAt(0).toUpperCase() + term.slice(1) : '';
+}
+
+function parseTerminationTag(terminationTag) {
+  const raw = (terminationTag || '').toString();
+  const t = raw.trim();
+  if (!t) return { winner: '', cause: '' };
+  const wonMatch = t.match(/^\s*([^\s].*?)\s+won\s+by\s+(.+?)\s*$/i);
+  if (wonMatch) {
+    return { winner: wonMatch[1], cause: wonMatch[2] };
+  }
+  const drawMatch = t.match(/\bdrawn\s+by\s+(.+?)\s*$/i);
+  if (drawMatch) {
+    return { winner: '', cause: drawMatch[1] };
+  }
+  // Fallback: try to use the whole phrase as cause
+  return { winner: '', cause: t };
+}
+
+function normalizePgnDateToDate(pgnDate) {
+  if (!pgnDate) return '';
+  if (pgnDate instanceof Date) return pgnDate;
+  const s = pgnDate.toString();
+  // Expect formats like YYYY.MM.DD or sometimes 023.08.29 (3-digit year)
+  const parts = s.split('.');
+  if (parts.length !== 3) return '';
+  let [y, m, d] = parts;
+  if (!/^[0-9?]+$/.test(y) || !/^[0-9?]+$/.test(m) || !/^[0-9?]+$/.test(d)) return '';
+  if (y.includes('?') || m.includes('?') || d.includes('?')) return '';
+  if (y.length === 3) y = '2' + y; // e.g., 023 -> 2023
+  if (y.length === 2) y = '20' + y; // fallback for 2-digit year
+  if (y.length !== 4) return '';
+  const iso = y + '-' + m.padStart(2, '0') + '-' + d.padStart(2, '0');
+  const dt = new Date(iso);
+  return isNaN(dt.getTime()) ? '' : dt;
 }
 
 function extractPgnTags(pgn) {
@@ -412,7 +450,20 @@ function gameToRow(game, username) {
   const pgn = game.pgn || '';
   const tags = extractPgnTags(pgn);
   const mv = extractMovesFromPgn(pgn);
-  const method = normalizeMethod(resultRaw, tags.Termination || '');
+  const parsedTerm = parseTerminationTag(tags.Termination || '');
+  const termination = normalizeMethod(parsedTerm.cause || resultRaw, tags.Termination || '');
+  // Winner determination
+  let winner = '';
+  const myUsername = my && my.username ? my.username : '';
+  if (parsedTerm.winner) {
+    winner = parsedTerm.winner;
+  } else if (result === 'Win') {
+    winner = myUsername || (myColor || '').charAt(0).toUpperCase() + (myColor || '').slice(1);
+  } else if (result === 'Loss') {
+    winner = opp && opp.username ? opp.username : (myColor === 'white' ? 'Black' : (myColor === 'black' ? 'White' : ''));
+  } else {
+    winner = 'Draw';
+  }
 
   const endEpoch = game.end_time || (tags.EndTime ? Date.parse(tags.EndDate + ' ' + tags.EndTime) / 1000 : '');
   const startEpoch = game.start_time || '';
@@ -439,19 +490,28 @@ function gameToRow(game, username) {
   push(myColor);
   push(opp && opp.username ? opp.username : '');
   push(oppRating);
-  push(result);
-  push(method);
+  // Build normalized Result phrase using usernames
+  let resultPhrase = '';
+  if (winner && winner.toLowerCase() !== 'draw') {
+    resultPhrase = winner + ' won by ' + (parsedTerm.cause || termination || '').toString().toLowerCase();
+  } else {
+    const drawCause = (parsedTerm.cause || termination || '').toString().toLowerCase();
+    resultPhrase = drawCause ? ('drawn by ' + drawCause) : 'drawn';
+  }
+  push(resultPhrase);
+  push(termination);
+  push(winner);
   push(tags.Event || '');
   push(tags.Site || '');
-  push(tags.Date || '');
+  push(normalizePgnDateToDate(tags.Date || ''));
   push(tags.Round || '');
   push(tags.Opening || '');
   push(tags.ECO || '');
   push(tags.ECOUrl || '');
-  push(tags.UTCDate || '');
+  push(normalizePgnDateToDate(tags.UTCDate || ''));
   push(tags.UTCTime || '');
   push(tags.StartTime || '');
-  push(tags.EndDate || '');
+  push(normalizePgnDateToDate(tags.EndDate || ''));
   push(tags.EndTime || '');
   push(game.fen || '');
   push(pgn);
@@ -465,7 +525,7 @@ function gameToRow(game, username) {
   push(hourDifferential);
 
   // Identity fields and stats
-  const myUsername = my && my.username ? my.username : '';
+  const myUsername = myUsername;
   const myId = my && (my.player_id || my.playerId || my.id) ? (my.player_id || my.playerId || my.id) : '';
   const myUuid = my && (my.uuid || my.uuid4 || my.guid) ? (my.uuid || my.uuid4 || my.guid) : '';
   const oppColor = myColor === 'white' ? 'black' : (myColor === 'black' ? 'white' : '');
@@ -625,7 +685,8 @@ function updateDailyData() {
   const idx = {
     endTime: header.indexOf('End Time'),
     timeClass: header.indexOf('Time Class'),
-    result: header.indexOf('Result'),
+    winner: header.indexOf('Winner'),
+    myUsername: header.indexOf('My Username'),
     myRating: header.indexOf('My Rating'),
     duration: header.indexOf('Game Duration (sec)')
   };
@@ -638,7 +699,12 @@ function updateDailyData() {
     const row = data[i];
     const dt = row[idx.endTime];
     const timeClass = (row[idx.timeClass] || '').toString().toLowerCase();
-    const result = (row[idx.result] || '').toString();
+    const winnerVal = (row[idx.winner] || '').toString();
+    const myName = (row[idx.myUsername] || '').toString();
+    let result = 'Draw';
+    if (winnerVal && winnerVal.toLowerCase() !== 'draw') {
+      result = (myName && winnerVal.toLowerCase() === myName.toLowerCase()) ? 'Win' : 'Loss';
+    }
     const rating = Number(row[idx.myRating] || 0);
     const dur = Number(row[idx.duration] || 0);
     if (!dt || !(dt instanceof Date)) continue;
