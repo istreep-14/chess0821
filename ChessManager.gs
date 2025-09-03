@@ -335,6 +335,19 @@ function normalizePgnDateToDate(pgnDate) {
   return isNaN(dt.getTime()) ? '' : dt;
 }
 
+function combinePgnDateAndTime(pgnDate, pgnTime, asUtc) {
+  if (!pgnDate || !pgnTime) return '';
+  const dOnly = normalizePgnDateToDate(pgnDate);
+  if (!dOnly) return '';
+  const y = dOnly.getFullYear();
+  const m = (dOnly.getMonth() + 1).toString().padStart(2, '0');
+  const d = dOnly.getDate().toString().padStart(2, '0');
+  const t = pgnTime.toString().trim();
+  const iso = y + '-' + m + '-' + d + 'T' + t + (asUtc ? 'Z' : '');
+  const dt = new Date(iso);
+  return isNaN(dt.getTime()) ? '' : dt;
+}
+
 function extractPgnTags(pgn) {
   if (!pgn) return {};
   const tags = {};
@@ -465,8 +478,10 @@ function gameToRow(game, username) {
     winner = 'Draw';
   }
 
-  const endEpoch = game.end_time || (tags.EndTime ? Date.parse(tags.EndDate + ' ' + tags.EndTime) / 1000 : '');
-  const startEpoch = game.start_time || '';
+  const utcStart = combinePgnDateAndTime(tags.UTCDate || '', tags.UTCTime || '', true) || '';
+  const pgnEnd = combinePgnDateAndTime(tags.EndDate || '', tags.EndTime || '', true) || '';
+  const endEpoch = pgnEnd ? Math.floor(pgnEnd.getTime() / 1000) : '';
+  const startEpoch = utcStart ? Math.floor(utcStart.getTime() / 1000) : '';
   // Timezone/context values
   const pgnTimezone = parsePgnTimezone(tags);
   const localStartTime = computeLocalStartTimeForLive(game, tags);
@@ -484,7 +499,7 @@ function gameToRow(game, username) {
   push(game.time_class || '');
   push(game.rules || '');
   push(computeFormat(game.rules));
-  push(formatDateTime(endEpoch));
+  push(pgnEnd || formatDateTime(endEpoch));
   push(computeGameDuration(startEpoch, endEpoch));
   push(myRating);
   push(myColor);
@@ -510,7 +525,7 @@ function gameToRow(game, username) {
   push(tags.ECOUrl || '');
   push(normalizePgnDateToDate(tags.UTCDate || ''));
   push(tags.UTCTime || '');
-  push(tags.StartTime || '');
+  push(utcStart || (tags.StartTime || ''));
   push(normalizePgnDateToDate(tags.EndDate || ''));
   push(tags.EndTime || '');
   push(game.fen || '');
