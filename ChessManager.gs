@@ -26,8 +26,8 @@ const HEADERS = {
     'Game URL', 'Time Control', 'Base Time (min)', 'Increment (sec)', 'Rated',
     'Time Class', 'Rules', 'Format', 'End Time', 'Game Duration (sec)',
     'My Rating', 'My Color', 'Opponent', 'Opponent Rating', 'Result',
-    'Termination', 'Event', 'Site', 'Date', 'Round', 'Opening', 'ECO',
-    'ECO URL', 'UTC Date', 'UTC Time', 'Start Time', 'End Date', 'End Time',
+    'Method', 'Event', 'Site', 'Date', 'Round', 'Opening', 'ECO',
+    'ECO URL', 'UTC Date', 'UTC Time', 'PGN Start Time', 'PGN End Date', 'PGN End Time',
     'Current Position', 'Full PGN', 'Moves', 'Times', 'Moves Per Side',
     'Opening from URL', 'Opening from ECO'
   ],
@@ -39,7 +39,7 @@ const HEADERS = {
     'Total Games', 'Total Wins', 'Total Losses', 'Total Draws', 'Rating Sum', 'Total Rating Change', 'Total Time (sec)', 'Avg Game Duration (sec)'
   ],
   LOGS: ['Timestamp', 'Function', 'Username', 'Status', 'Execution Time (ms)', 'Notes'],
-  STATS: ['Pulled At'],
+  STATS: ['Field', 'Value'],
   PROFILE: ['Field', 'Value']
 };
 
@@ -127,8 +127,8 @@ function setupSheets() {
 function ensureSheetWithHeaders(ss, name, headers) {
   let sheet = ss.getSheetByName(name);
   if (!sheet) sheet = ss.insertSheet(name);
-  sheet.clear();
   const headerRow = Array.isArray(headers[0]) ? headers[0] : headers;
+  // Only set header row; do not clear existing data
   sheet.getRange(1, 1, 1, headerRow.length).setValues([headerRow]).setFontWeight('bold');
   sheet.setFrozenRows(1);
 }
@@ -190,10 +190,24 @@ function buildApiUrl(path) {
 }
 
 function fetchJson(url) {
-  const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, validateHttpsCertificates: true });
-  const code = resp.getResponseCode();
-  if (code >= 200 && code < 300) return JSON.parse(resp.getContentText());
-  throw new Error('HTTP ' + code + ' for ' + url);
+  const maxAttempts = 5;
+  const baseSleepMs = 500;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, validateHttpsCertificates: true });
+      const code = resp.getResponseCode();
+      if (code >= 200 && code < 300) return JSON.parse(resp.getContentText());
+      if (code === 429 || (code >= 500 && code < 600)) {
+        const sleepMs = baseSleepMs * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+        Utilities.sleep(sleepMs);
+        continue;
+      }
+      throw new Error('HTTP ' + code + ' for ' + url);
+    } catch (e) {
+      if (attempt === maxAttempts) throw e;
+      Utilities.sleep(baseSleepMs * Math.pow(2, attempt - 1));
+    }
+  }
 }
 
 // =================================================================
@@ -250,7 +264,33 @@ function simplifyResult(result) {
   const r = result.toLowerCase();
   if (r === 'win') return 'Win';
   if (r === 'agreed' || r === 'repetition' || r === 'stalemate' || r === 'insufficient' || r === '50move' || r === 'timevsinsufficient') return 'Draw';
+  if (r === 'draw') return 'Draw';
   return 'Loss';
+}
+
+function normalizeMethod(myResultRaw, terminationTag) {
+  const val = (myResultRaw || '').toString().toLowerCase();
+  const term = (terminationTag || '').toString().toLowerCase();
+  const map = {
+    checkmated: 'Checkmate',
+    resigned: 'Resignation',
+    timeout: 'Timeout',
+    abandoned: 'Abandoned',
+    stalemate: 'Stalemate',
+    agreed: 'Agreed Draw',
+    repetition: 'Repetition',
+    insufficient: 'Insufficient Material',
+    '50move': '50-move Rule',
+    timevsinsufficient: 'Time vs Insufficient Material',
+    '': ''
+  };
+  if (map[val]) return map[val];
+  // Try termination tag
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i] && term.indexOf(keys[i]) !== -1) return map[keys[i]];
+  }
+  return term ? term.charAt(0).toUpperCase() + term.slice(1) : '';
 }
 
 function extractPgnTags(pgn) {
@@ -266,10 +306,42 @@ function extractPgnTags(pgn) {
 
 function extractMovesFromPgn(pgn) {
   if (!pgn) return { moves: '', times: '', movesPerSide: '' };
-  const parts = pgn.split(/\n\n/);
-  const movesText = parts.length > 1 ? parts[parts.length - 1] : '';
-  // Very light parsing; leave times blank by default
-  const moves = movesText.replace(/\{[^}]*\}/g, '').trim();
+  const blankLineIndex = pgn.indexOf('\n\n');
+  if (blankLineIndex === -1) return { moves: '', times: '', movesPerSide: '' };
+  let movesText = pgn.slice(blankLineIndex + 2).trim();
+  movesText = movesText.replace(/\s+(1-0|0-1|1\/2-1\/2|\*)\s*$/, '');
+  movesText = movesText.replace(/\([^)]*\)/g, '');
+  movesText = movesText.replace(/\$\d+/g, '');
+
+  const segments = [];
+  const pairRegex = /(\d+)\.\s*(?!\.\.\.)([^\s{}]+)(?:\s*\{([^}]*)\})?(?:\s+(?:(?:\d+)?\.{3}\s*)?([^\s{}]+)(?:\s*\{([^}]*)\})?)?/g;
+  let m;
+  while ((m = pairRegex.exec(movesText)) !== null) {
+    const moveNo = m[1];
+    const whiteSan = m[2];
+    const whiteComment = m[3] || '';
+    const blackSan = m[4];
+    const blackComment = m[5] || '';
+    const wClkMatch = whiteComment.match(/\[%clk\s+([0-9:\.]+)\]/);
+    const bClkMatch = (blackComment || '').match(/\[%clk\s+([0-9:\.]+)\]/);
+    const wStr = whiteSan ? (whiteSan + (wClkMatch ? ' [' + wClkMatch[1] + ']' : '')) : '';
+    const bStr = blackSan ? (blackSan + (bClkMatch ? ' [' + bClkMatch[1] + ']' : '')) : '';
+    if (wStr || bStr) {
+      segments.push(moveNo + '. ' + [wStr, bStr].filter(Boolean).join(' '));
+    }
+  }
+  // Handle black-only notation like: 23... c5 {[%clk 0:00:42]}
+  const blackOnlyRegex = /(\d+)\.\s*\.\.\.\s*([^\s{}]+)(?:\s*\{([^}]*)\})?/g;
+  while ((m = blackOnlyRegex.exec(movesText)) !== null) {
+    const moveNo = m[1];
+    const blackSan = m[2];
+    const blackComment = m[3] || '';
+    const bClkMatch = blackComment.match(/\[%clk\s+([0-9:\.]+)\]/);
+    const bStr = blackSan + (bClkMatch ? ' [' + bClkMatch[1] + ']' : '');
+    segments.push(moveNo + '... ' + bStr);
+  }
+
+  const moves = segments.join(' ');
   return { moves, times: '', movesPerSide: '' };
 }
 
@@ -286,6 +358,7 @@ function gameToRow(game, username) {
   const pgn = game.pgn || '';
   const tags = extractPgnTags(pgn);
   const mv = extractMovesFromPgn(pgn);
+  const method = normalizeMethod(resultRaw, tags.Termination || '');
 
   const endEpoch = game.end_time || (tags.EndTime ? Date.parse(tags.EndDate + ' ' + tags.EndTime) / 1000 : '');
   const startEpoch = game.start_time || '';
@@ -308,7 +381,7 @@ function gameToRow(game, username) {
   push(opp && opp.username ? opp.username : '');
   push(oppRating);
   push(result);
-  push(tags.Termination || '');
+  push(method);
   push(tags.Event || '');
   push(tags.Site || '');
   push(tags.Date || '');
@@ -549,12 +622,13 @@ function updateStats() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(SHEETS.STATS);
   const flat = flattenObject(stats);
-  const values = [['Pulled At', new Date()]];
-  Object.keys(flat).sort().forEach(k => values.push([k, flat[k]]));
+  const rows = [['Field', 'Value']];
+  rows.push(['Pulled At', new Date()]);
+  Object.keys(flat).sort().forEach(k => rows.push([k, flat[k]]));
   sheet.clear();
-  sheet.getRange(1, 1, 1, 1).setValue('Pulled At').setFontWeight('bold');
-  sheet.getRange(2, 1, values.length - 1, 2).setValues(values.slice(1));
-  logExecution('updateStats', username, 'SUCCESS', new Date().getTime() - startMs, 'Stats fields: ' + (values.length - 1));
+  sheet.getRange(1, 1, rows.length, 2).setValues(rows).setFontWeight('bold');
+  sheet.getRange(2, 1, rows.length - 1, 2).setFontWeight('normal');
+  logExecution('updateStats', username, 'SUCCESS', new Date().getTime() - startMs, 'Stats fields: ' + (rows.length - 2));
 }
 
 function fetchPlayerProfile(username) {
@@ -633,25 +707,29 @@ function categorizeOpeningsFromUrl() {
   let categorizedCount = 0;
   const newUrlsToAdd = [];
 
+  const targetValues = [];
   for (let i = 1; i < gameData.length; i++) {
     const gameEcoUrl = gameData[i][ecoUrlIndex];
-    if (!gameEcoUrl) continue;
     let foundFamily = '';
-    for (const [baseUrl, familyName] of openingMap.entries()) {
-      if (gameEcoUrl.toString().startsWith(baseUrl)) {
-        foundFamily = familyName;
-        categorizedCount++;
-        break;
+    if (gameEcoUrl) {
+      for (const [baseUrl, familyName] of openingMap.entries()) {
+        if (gameEcoUrl.toString().startsWith(baseUrl)) {
+          foundFamily = familyName;
+          categorizedCount++;
+          break;
+        }
+      }
+      if (!foundFamily && !existingAddUrls.has(gameEcoUrl)) {
+        newUrlsToAdd.push([gameEcoUrl]);
+        existingAddUrls.add(gameEcoUrl);
       }
     }
-    gameData[i][targetColIndex] = foundFamily;
-    if (!foundFamily && !existingAddUrls.has(gameEcoUrl)) {
-      newUrlsToAdd.push([gameEcoUrl]);
-      existingAddUrls.add(gameEcoUrl);
-    }
+    targetValues.push([foundFamily]);
   }
 
-  gameSheet.getRange(1, 1, gameData.length, gameData[0].length).setValues(gameData);
+  if (targetValues.length > 0) {
+    gameSheet.getRange(2, targetColIndex + 1, targetValues.length, 1).setValues(targetValues);
+  }
   if (newUrlsToAdd.length > 0) {
     addOpeningsSheet.getRange(addOpeningsSheet.getLastRow() + 1, 1, newUrlsToAdd.length, 1).setValues(newUrlsToAdd);
   }
@@ -691,16 +769,21 @@ function categorizeOpeningsFromEco() {
   if (ecoIndex === -1 || targetColIndex === -1) { return; }
 
   let categorizedCount = 0;
+  const targetValues = [];
   for (let i = 1; i < gameData.length; i++) {
     const gameEcoCode = gameData[i][ecoIndex];
     const key = gameEcoCode ? gameEcoCode.toString().trim() : '';
+    let val = '';
     if (key && ecoMap.has(key)) {
-      gameData[i][targetColIndex] = ecoMap.get(key);
+      val = ecoMap.get(key);
       categorizedCount++;
     }
+    targetValues.push([val]);
   }
 
-  gameSheet.getRange(1, 1, gameData.length, gameData[0].length).setValues(gameData);
+  if (targetValues.length > 0) {
+    gameSheet.getRange(2, targetColIndex + 1, targetValues.length, 1).setValues(targetValues);
+  }
   SpreadsheetApp.getActiveSpreadsheet().toast('ECO categorization complete! Updated ' + categorizedCount + ' games.', 'Success', 8);
 }
 
@@ -806,6 +889,8 @@ function deleteAllTriggers() {
 // =================================================================
 
 function refreshRecentData() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { throw new Error('Another run is in progress'); }
   const startTime = new Date().getTime();
   let username = '';
   const results = [];
@@ -835,6 +920,8 @@ function refreshRecentData() {
     const executionTime = new Date().getTime() - startTime;
     logExecution('refreshRecentData', username, 'ERROR', executionTime, error.message);
     throw error;
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
   }
 }
 
@@ -843,6 +930,8 @@ function refreshRecentData() {
 // =================================================================
 
 function quickUpdate() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { throw new Error('Another run is in progress'); }
   const startMs = new Date().getTime();
   const username = getUsername();
   const results = [];
@@ -878,9 +967,14 @@ function quickUpdate() {
   }
   SpreadsheetApp.getActiveSpreadsheet().toast(results.join('\n'), 'Quick Update', 8);
   logExecution('quickUpdate', username, 'SUCCESS', new Date().getTime() - startMs, results.join(', '));
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
 }
 
 function completeUpdate() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { throw new Error('Another run is in progress'); }
   const startMs = new Date().getTime();
   const username = getUsername();
   const results = [];
@@ -916,5 +1010,8 @@ function completeUpdate() {
   }
   SpreadsheetApp.getActiveSpreadsheet().toast(results.join('\n'), 'Complete Update', 8);
   logExecution('completeUpdate', username, 'SUCCESS', new Date().getTime() - startMs, results.join(', '));
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
 }
 
