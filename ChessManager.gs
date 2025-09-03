@@ -335,6 +335,46 @@ function normalizePgnDateToDate(pgnDate) {
   return isNaN(dt.getTime()) ? '' : dt;
 }
 
+function normalizePgnTimeToHms(pgnTime) {
+  if (!pgnTime) return '';
+  const s = pgnTime.toString().trim();
+  if (!s || s.indexOf('?') !== -1) return '';
+  const match = s.match(/^(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2})(?:\.\d+)?)?$/);
+  if (!match) return '';
+  let hh = parseInt(match[1], 10);
+  let mm = match[2] !== undefined ? parseInt(match[2], 10) : 0;
+  let ss = match[3] !== undefined ? parseInt(match[3], 10) : 0;
+  if (isNaN(hh) || isNaN(mm) || isNaN(ss)) return '';
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return '';
+  const hStr = String(hh).padStart(2, '0');
+  const mStr = String(mm).padStart(2, '0');
+  const sStr = String(ss).padStart(2, '0');
+  return hStr + ':' + mStr + ':' + sStr;
+}
+
+function combinePgnDateAndTimeToDate(pgnDate, pgnTime, assumeUtc) {
+  try {
+    if (!pgnDate || !pgnTime) return '';
+    const ds = pgnDate.toString();
+    const parts = ds.split('.');
+    if (parts.length !== 3) return '';
+    let [y, m, d] = parts;
+    if (!/^[0-9]+$/.test(y) || !/^[0-9]+$/.test(m) || !/^[0-9]+$/.test(d)) return '';
+    if (y.length === 3) y = '2' + y; // 3-digit year -> 20xx
+    if (y.length === 2) y = '20' + y; // 2-digit year -> 20xx
+    if (y.length !== 4) return '';
+    const mm = m.padStart(2, '0');
+    const dd = d.padStart(2, '0');
+    const hms = normalizePgnTimeToHms(pgnTime);
+    if (!hms) return '';
+    const iso = y + '-' + mm + '-' + dd + 'T' + hms + (assumeUtc ? 'Z' : '');
+    const dt = new Date(iso);
+    return isNaN(dt.getTime()) ? '' : dt;
+  } catch (e) {
+    return '';
+  }
+}
+
 function extractPgnTags(pgn) {
   if (!pgn) return {};
   const tags = {};
@@ -465,13 +505,20 @@ function gameToRow(game, username) {
     winner = 'Draw';
   }
 
-  const endEpoch = game.end_time || (tags.EndTime ? Date.parse(tags.EndDate + ' ' + tags.EndTime) / 1000 : '');
-  const startEpoch = game.start_time || '';
+  const startUtc = (tags && tags.UTCDate && tags.UTCTime)
+    ? combinePgnDateAndTimeToDate(tags.UTCDate, tags.UTCTime, true)
+    : (game.start_time ? new Date(game.start_time * 1000) : '');
+  const endCombined = (tags && tags.EndDate && tags.EndTime)
+    ? combinePgnDateAndTimeToDate(tags.EndDate, tags.EndTime, true)
+    : (game.end_time ? new Date(game.end_time * 1000) : '');
+  const durationSec = (startUtc && endCombined)
+    ? Math.max(0, Math.round((endCombined.getTime() - startUtc.getTime()) / 1000))
+    : '';
   // Timezone/context values
   const pgnTimezone = parsePgnTimezone(tags);
   const localStartTime = computeLocalStartTimeForLive(game, tags);
   const myTimezone = getLocalTimezoneName();
-  const hourDifferential = computeHourDifferential(pgnTimezone, localStartTime || (endEpoch ? new Date(endEpoch * 1000) : null));
+  const hourDifferential = computeHourDifferential(pgnTimezone, localStartTime || (endCombined ? endCombined : null));
 
   const row = [];
   const push = (v) => row.push(v === undefined ? '' : v);
@@ -484,8 +531,8 @@ function gameToRow(game, username) {
   push(game.time_class || '');
   push(game.rules || '');
   push(computeFormat(game.rules));
-  push(formatDateTime(endEpoch));
-  push(computeGameDuration(startEpoch, endEpoch));
+  push(endCombined || '');
+  push(durationSec);
   push(myRating);
   push(myColor);
   push(opp && opp.username ? opp.username : '');
@@ -510,7 +557,7 @@ function gameToRow(game, username) {
   push(tags.ECOUrl || '');
   push(normalizePgnDateToDate(tags.UTCDate || ''));
   push(tags.UTCTime || '');
-  push(tags.StartTime || '');
+  push(startUtc || '');
   push(normalizePgnDateToDate(tags.EndDate || ''));
   push(tags.EndTime || '');
   push(game.fen || '');
