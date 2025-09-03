@@ -936,6 +936,7 @@ function quickUpdate() {
   const username = getUsername();
   const results = [];
   try {
+    try {
     updateArchives();
     results.push('Archives updated');
   } catch (e) {
@@ -967,6 +968,9 @@ function quickUpdate() {
   }
   SpreadsheetApp.getActiveSpreadsheet().toast(results.join('\n'), 'Quick Update', 8);
   logExecution('quickUpdate', username, 'SUCCESS', new Date().getTime() - startMs, results.join(', '));
+  } catch (error) {
+    logExecution('quickUpdate', username, 'ERROR', new Date().getTime() - startMs, error.message);
+    throw error;
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
@@ -979,6 +983,7 @@ function completeUpdate() {
   const username = getUsername();
   const results = [];
   try {
+    try {
     updateArchives();
     results.push('Archives updated');
   } catch (e) {
@@ -1010,6 +1015,9 @@ function completeUpdate() {
   }
   SpreadsheetApp.getActiveSpreadsheet().toast(results.join('\n'), 'Complete Update', 8);
   logExecution('completeUpdate', username, 'SUCCESS', new Date().getTime() - startMs, results.join(', '));
+  } catch (error) {
+    logExecution('completeUpdate', username, 'ERROR', new Date().getTime() - startMs, error.message);
+    throw error;
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
