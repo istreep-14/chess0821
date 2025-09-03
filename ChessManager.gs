@@ -24,11 +24,12 @@ const HEADERS = {
   ARCHIVES: ['Archive URL', 'Year-Month', 'Last Updated'],
   GAMES: [
     'Game URL', 'Time Control', 'Base Time (min)', 'Increment (sec)', 'Rated',
-    'Time Class', 'Rules', 'Format', 'End Time', 'Game Duration (sec)',
-    'My Rating', 'My Color', 'Opponent', 'Opponent Rating', 'Result',
+    'Time Class', 'Rules', 'Format', 'Start Time', 'End Time', 'Game Duration (sec)',
+    'My Username', 'My Rating', 'Rating Change', 'My Player ID', 'My UUID',
+    'My Color', 'Opponent Color', 'Opponent Username', 'Opponent Rating', 'Opponent Player ID', 'Opponent UUID', 'Result',
     'Method', 'Event', 'Site', 'Date', 'Round', 'Opening', 'ECO',
     'ECO URL', 'UTC Date', 'UTC Time', 'PGN Start Time', 'PGN End Date', 'PGN End Time',
-    'Current Position', 'Full PGN', 'Moves', 'Times', 'Moves Per Side',
+    'Current Position', 'Full PGN', 'Moves', 'Times', 'Moves Per Side', 'My Accuracy', 'Opponent Accuracy',
     'Opening from URL', 'Opening from ECO'
   ],
   DAILY: [
@@ -240,6 +241,23 @@ function formatDate(epochSeconds) {
   return new Date(epochSeconds * 1000);
 }
 
+function parseUtcTagsToDate(tags) {
+  // PGN often provides UTCDate (YYYY.MM.DD) and UTCTime (HH:MM:SS)
+  const utcDate = tags.UTCDate || tags.UtcDate || '';
+  const utcTime = tags.UTCTime || tags.UtcTime || '';
+  if (!utcDate || !utcTime) return '';
+  const m = utcDate.match(/^(\d{4})[.\-](\d{2})[.\-](\d{2})$/);
+  const t = utcTime.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m || !t) return '';
+  const year = parseInt(m[1], 10);
+  const monthZero = parseInt(m[2], 10) - 1;
+  const day = parseInt(m[3], 10);
+  const hour = parseInt(t[1], 10);
+  const minute = parseInt(t[2], 10);
+  const second = t[3] ? parseInt(t[3], 10) : 0;
+  return new Date(Date.UTC(year, monthZero, day, hour, minute, second));
+}
+
 function computeGameDuration(startEpoch, endEpoch) {
   if (!startEpoch || !endEpoch) return '';
   const sec = Math.max(0, endEpoch - startEpoch);
@@ -360,8 +378,9 @@ function gameToRow(game, username) {
   const mv = extractMovesFromPgn(pgn);
   const method = normalizeMethod(resultRaw, tags.Termination || '');
 
+  const pgnUtcStart = parseUtcTagsToDate(tags); // local Date constructed from UTC
+  const startEpoch = pgnUtcStart ? Math.floor(pgnUtcStart.getTime() / 1000) : (game.start_time || '');
   const endEpoch = game.end_time || (tags.EndTime ? Date.parse(tags.EndDate + ' ' + tags.EndTime) / 1000 : '');
-  const startEpoch = game.start_time || '';
 
   const row = [];
   const push = (v) => row.push(v === undefined ? '' : v);
@@ -374,12 +393,20 @@ function gameToRow(game, username) {
   push(game.time_class || '');
   push(game.rules || '');
   push(computeFormat(game.rules));
+  push(formatDateTime(startEpoch));
   push(formatDateTime(endEpoch));
   push(computeGameDuration(startEpoch, endEpoch));
+  push(my && my.username ? my.username : '');
   push(myRating);
+  push(my && typeof my.rating_change !== 'undefined' ? my.rating_change : '');
+  push(my && my.player ? my.player : '');
+  push(my && my.uuid ? my.uuid : '');
   push(myColor);
+  push(myColor === 'white' ? 'black' : (myColor === 'black' ? 'white' : ''));
   push(opp && opp.username ? opp.username : '');
   push(oppRating);
+  push(opp && opp.player ? opp.player : '');
+  push(opp && opp.uuid ? opp.uuid : '');
   push(result);
   push(method);
   push(tags.Event || '');
@@ -399,6 +426,10 @@ function gameToRow(game, username) {
   push(mv.moves);
   push(mv.times);
   push(mv.movesPerSide);
+  const myAcc = (game.accuracies && typeof game.accuracies[myColor] !== 'undefined') ? game.accuracies[myColor] : '';
+  const oppAcc = (game.accuracies && typeof game.accuracies[myColor === 'white' ? 'black' : 'white'] !== 'undefined') ? game.accuracies[myColor === 'white' ? 'black' : 'white'] : '';
+  push(myAcc);
+  push(oppAcc);
   push(''); // Opening from URL (to be filled by categorize)
   push(''); // Opening from ECO (to be filled by categorize)
 
