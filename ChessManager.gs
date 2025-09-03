@@ -537,14 +537,8 @@ function gameToRow(game, username) {
   push(myColor);
   push(opp && opp.username ? opp.username : '');
   push(oppRating);
-  // Build normalized Result phrase using usernames
-  let resultPhrase = '';
-  if (winner && winner.toLowerCase() !== 'draw') {
-    resultPhrase = winner + ' won by ' + (parsedTerm.cause || termination || '').toString().toLowerCase();
-  } else {
-    const drawCause = (parsedTerm.cause || termination || '').toString().toLowerCase();
-    resultPhrase = drawCause ? ('drawn by ' + drawCause) : 'drawn';
-  }
+  // Use API-provided termination phrase as-is
+  const resultPhrase = (tags.Termination || '').toString();
   push(resultPhrase);
   push(termination);
   push(winner);
