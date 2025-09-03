@@ -537,14 +537,8 @@ function gameToRow(game, username) {
   push(myColor);
   push(opp && opp.username ? opp.username : '');
   push(oppRating);
-  // Build normalized Result phrase using usernames
-  let resultPhrase = '';
-  if (winner && winner.toLowerCase() !== 'draw') {
-    resultPhrase = winner + ' won by ' + (parsedTerm.cause || termination || '').toString().toLowerCase();
-  } else {
-    const drawCause = (parsedTerm.cause || termination || '').toString().toLowerCase();
-    resultPhrase = drawCause ? ('drawn by ' + drawCause) : 'drawn';
-  }
+  // Use API-provided termination phrase as-is
+  const resultPhrase = (tags.Termination || '').toString();
   push(resultPhrase);
   push(termination);
   push(winner);
@@ -572,7 +566,6 @@ function gameToRow(game, username) {
   push(hourDifferential);
 
   // Identity fields and stats
-  const myUsername = myUsername;
   const myId = my && (my.player_id || my.playerId || my.id) ? (my.player_id || my.playerId || my.id) : '';
   const myUuid = my && (my.uuid || my.uuid4 || my.guid) ? (my.uuid || my.uuid4 || my.guid) : '';
   const oppColor = myColor === 'white' ? 'black' : (myColor === 'black' ? 'white' : '');
