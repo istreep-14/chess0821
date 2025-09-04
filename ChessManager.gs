@@ -130,11 +130,45 @@ function setupSheets() {
 
 function ensureSheetWithHeaders(ss, name, headers) {
   let sheet = ss.getSheetByName(name);
-  if (!sheet) sheet = ss.insertSheet(name);
-  const headerRow = Array.isArray(headers[0]) ? headers[0] : headers;
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    SpreadsheetApp.flush();
+  }
+
+  const headerRow = Array.isArray(headers && headers[0]) ? headers[0] : headers;
+  if (!Array.isArray(headerRow)) {
+    throw new Error('Invalid headers for sheet: ' + name);
+  }
+
+  // Ensure the sheet has enough columns for the header row
+  var requiredColumns = headerRow.length;
+  var maxColumns = sheet.getMaxColumns();
+  if (maxColumns < requiredColumns) {
+    sheet.insertColumnsAfter(maxColumns, requiredColumns - maxColumns);
+    SpreadsheetApp.flush();
+  }
+
   // Only set header row; do not clear existing data
-  sheet.getRange(1, 1, 1, headerRow.length).setValues([headerRow]).setFontWeight('bold');
-  sheet.setFrozenRows(1);
+  // Retry a few times in case of transient "Sheet not found" errors after insertion
+  var attempts = 0;
+  var maxAttempts = 3;
+  while (true) {
+    try {
+      sheet.getRange(1, 1, 1, requiredColumns).setValues([headerRow]).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+      break;
+    } catch (e) {
+      attempts++;
+      var message = (e && e.message) ? e.message : String(e);
+      if (attempts >= maxAttempts || message.indexOf('Sheet') === -1 || message.indexOf('not found') === -1) {
+        throw e;
+      }
+      // Re-resolve the sheet and retry after a short backoff
+      Utilities.sleep(100 * attempts);
+      sheet = ss.getSheetByName(name) || ss.insertSheet(name);
+      SpreadsheetApp.flush();
+    }
+  }
 }
 
 function getUsername() {
